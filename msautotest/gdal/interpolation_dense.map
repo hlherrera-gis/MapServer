@@ -1,0 +1,124 @@
+#RUN_PARMS: interpolation_dense_krig_mean.png [MAP2IMG] -m [MAPFILE] -i png -o [RESULT] -l krig_mean
+#RUN_PARMS: interpolation_dense_krig_sd.png [MAP2IMG] -m [MAPFILE] -i png -o [RESULT] -l krig_sd
+#RUN_PARMS: interpolation_dense_idw.png [MAP2IMG] -m [MAPFILE] -i png -o [RESULT] -l idw
+#RUN_PARMS: interpolation_dense_heat.png [MAP2IMG] -m [MAPFILE] -i png -o [RESULT] -l heat
+#
+# Reliability + scalability regression for the SHARED msInterpolationDataset
+# ingest (kriging, IDW and kernel density). data/interpolation_dense.csv holds
+# 700 points (value 100) over a 32x32 frame -- a dense, heavily-coincident,
+# CONSTANT field that exercises the ingest two ways at once:
+#
+#   * Scalability: 700 in-bounds points exceed the per-pixel xyz buffer's old
+#     capacity (width*height/3 = 341 for the kriging/no-border path), which
+#     previously overran the heap. The fix bounds samples at <= width*height.
+#   * Reliability: for IDW and kriging, points sharing a pixel are AVERAGED, not
+#     summed -- so a constant field reads back as ~100 everywhere (krig_mean and
+#     idw are a uniform colour). Summing would inflate it into garbage.
+#
+# Kernel density COUNTS points, so it (correctly) keeps the per-pixel sum and is
+# deliberately left unchanged -- its expected image must be byte-identical
+# before and after the fix, guarding against the averaging leaking into density.
+#
+# No fonts/labels -> AGG raster, platform-independent expected images.
+# "kriging" is a reserved keyword, so the kriging layers avoid it in their names.
+#
+MAP
+  NAME "INTERPOLATION_DENSE_TEST"
+  STATUS ON
+  SIZE 32 32
+  EXTENT 0 0 32 32
+  IMAGECOLOR 255 255 255
+  IMAGETYPE png
+
+  LAYER
+    NAME "krig_mean"
+    TYPE raster
+    STATUS ON
+    CONNECTIONTYPE kriging
+    CONNECTION "pts"
+    PROCESSING "RANGE_COLORSPACE=RGB"
+    PROCESSING "KRIGING_MODEL=EXPONENTIAL"
+    PROCESSING "KRIGING_TYPE=ORDINARY"
+    PROCESSING "KRIGING_NEIGHBORS=8"
+    PROCESSING "KRIGING_RANGE=16"
+    PROCESSING "KRIGING_NUGGET=1"
+    CLASS
+      STYLE
+        COLORRANGE 0 0 255  255 0 0
+        DATARANGE 0 200
+      END
+    END
+  END
+
+  LAYER
+    NAME "krig_sd"
+    TYPE raster
+    STATUS ON
+    CONNECTIONTYPE kriging
+    CONNECTION "pts"
+    PROCESSING "RANGE_COLORSPACE=RGB"
+    PROCESSING "BANDS=2"
+    PROCESSING "KRIGING_MODEL=EXPONENTIAL"
+    PROCESSING "KRIGING_TYPE=ORDINARY"
+    PROCESSING "KRIGING_NEIGHBORS=8"
+    PROCESSING "KRIGING_RANGE=16"
+    PROCESSING "KRIGING_NUGGET=1"
+    CLASS
+      STYLE
+        COLORRANGE 0 0 0  255 255 255
+        DATARANGE 0 30
+      END
+    END
+  END
+
+  LAYER
+    NAME "idw"
+    TYPE raster
+    STATUS ON
+    CONNECTIONTYPE idw
+    CONNECTION "pts"
+    PROCESSING "RANGE_COLORSPACE=RGB"
+    PROCESSING "IDW_RADIUS=48"
+    PROCESSING "IDW_POWER=2"
+    PROCESSING "IDW_COMPUTE_BORDERS=OFF"
+    CLASS
+      STYLE
+        COLORRANGE 0 0 255  255 0 0
+        DATARANGE 0 200
+      END
+    END
+  END
+
+  LAYER
+    NAME "heat"
+    TYPE raster
+    STATUS ON
+    CONNECTIONTYPE kerneldensity
+    CONNECTION "pts"
+    PROCESSING "RANGE_COLORSPACE=RGB"
+    PROCESSING "KERNELDENSITY_RADIUS=5"
+    PROCESSING "KERNELDENSITY_COMPUTE_BORDERS=OFF"
+    PROCESSING "KERNELDENSITY_NORMALIZATION=AUTO"
+    CLASS
+      STYLE
+        COLORRANGE 0 0 0  255 255 255
+        DATARANGE 0 255
+      END
+    END
+  END
+
+  # invisible weight carrier (CONNECTION above == this layer's NAME).
+  LAYER
+    NAME "pts"
+    TYPE point
+    STATUS OFF
+    CONNECTIONTYPE OGR
+    CONNECTION "data/interpolation_dense.csv"
+    DATA "interpolation_dense"
+    CLASS
+      STYLE
+        SIZE [weight]
+      END
+    END
+  END
+END

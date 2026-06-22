@@ -68,6 +68,7 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
   shapeObj shape;
   layerObj *layer = NULL;
   float *values = NULL, *xyz_values = NULL;
+  int *counts = NULL; /* per-pixel sample count, for averaging (IDW/kriging) */
   int im_width = image->width, im_height = image->height;
   double invcellsize = 1.0 / map->cellsize, georadius = 0;
   unsigned char *iValues;
@@ -79,6 +80,9 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
   assert(interpolation_layer->connectiontype == MS_KERNELDENSITY ||
          interpolation_layer->connectiontype == MS_IDW ||
          interpolation_layer->connectiontype == MS_KRIGING);
+  /* IDW/kriging average points sharing a pixel; KernelDensity keeps the sum. */
+  const int is_interp = (interpolation_layer->connectiontype == MS_IDW ||
+                         interpolation_layer->connectiontype == MS_KRIGING);
   *cleanup_ptr = NULL;
 
   if (!interpolation_layer->connection || !*interpolation_layer->connection) {
@@ -176,8 +180,9 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
       if (!values) { /* defer allocation until we effectively have a feature */
         values = (float *)msSmallCalloc(((size_t)im_width) * im_height,
                                         sizeof(float));
-        xyz_values = (float *)msSmallCalloc(((size_t)im_width) * im_height,
-                                            sizeof(float));
+        if (is_interp) /* parallel count grid, for the per-pixel average */
+          counts = (int *)msSmallCalloc(((size_t)im_width) * im_height,
+                                        sizeof(int));
       }
       if (layer->project)
         msProjectShape(&layer->projection, &map->projection, &shape);
@@ -221,11 +226,11 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
               MS_MAP2IMAGE_YCELL_IC(shape.line[l].point[p].y,
                                     map->extent.maxy + georadius, invcellsize);
           if (x >= 0 && y >= 0 && x < im_width && y < im_height) {
-            float *value = values + y * im_width + x;
-            (*value) += weight;
-            xyz_values[length++] = x;
-            xyz_values[length++] = y;
-            xyz_values[length++] = (*value);
+            int idx = y * im_width + x;
+            values[idx] += weight;
+            if (counts)
+              counts[idx]++;
+            length++; /* total in-bounds points (KernelDensity sample count) */
           }
         }
       }
@@ -236,8 +241,8 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
 
     msFree(classgroup);
 
-    // number of layer points.
-    npoints = length / 3;
+    // number of in-bounds points (the sample count KernelDensity expects).
+    npoints = length;
   } else if (status != MS_DONE) {
     msLayerClose(layer);
     return MS_FAILURE;
@@ -246,6 +251,22 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
   /* status == MS_DONE */
   msLayerClose(layer);
   status = MS_SUCCESS;
+
+  /* IDW/kriging: one sample per occupied pixel, value = mean of the points that
+   * landed there -- averages coincident measurements (a per-pixel sum would
+   * inflate the field) and bounds the sample count at <= width*height. */
+  if (is_interp && counts) {
+    const int npix = im_width * im_height;
+    int idx, k = 0;
+    xyz_values = (float *)msSmallMalloc((size_t)3 * npix * sizeof(float));
+    for (idx = 0; idx < npix; idx++)
+      if (counts[idx] > 0) {
+        xyz_values[k++] = (float)(idx % im_width);
+        xyz_values[k++] = (float)(idx / im_width);
+        xyz_values[k++] = values[idx] / (float)counts[idx];
+      }
+    npoints = k / 3;
+  }
 
   /* kriging emits two bands (1 = mean, 2 = predictive std dev); the others one.
    * All bands live in a single allocation so a single free() cleans up. */
@@ -275,6 +296,7 @@ int msInterpolationDataset(mapObj *map, imageObj *image,
 
   free(values);
   free(xyz_values);
+  free(counts);
 
   GDALDriverH hMemDRV = GDALGetDriverByName("MEM");
   if (!hMemDRV) {
